@@ -55,6 +55,32 @@ export function viewOf(bytes: Uint8Array): DataView {
   return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 }
 
+export function zoneOffset(ms: number): string {
+  const minutes = -new Date(ms).getTimezoneOffset();
+  const sign = minutes < 0 ? "-" : "+";
+  const abs = Math.abs(minutes);
+  const p = (value: number) => String(value).padStart(2, "0");
+  return `${sign}${p(Math.floor(abs / 60))}:${p(abs % 60)}`;
+}
+
+export function utcIso(ms: number): string {
+  const date = new Date(ms);
+  const p = (value: number) => String(value).padStart(2, "0");
+  return `${date.getUTCFullYear()}-${p(date.getUTCMonth() + 1)}-${p(date.getUTCDate())}T${p(date.getUTCHours())}:${p(date.getUTCMinutes())}:${p(date.getUTCSeconds())}`;
+}
+
+export function xmpPacket(iso: string, offset: string): Uint8Array {
+  const stamp = `${iso}${offset}`;
+  const xml =
+    `<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>` +
+    `<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">` +
+    `<rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:exif="http://ns.adobe.com/exif/1.0/" xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/">` +
+    `<xmp:CreateDate>${stamp}</xmp:CreateDate><xmp:ModifyDate>${stamp}</xmp:ModifyDate>` +
+    `<exif:DateTimeOriginal>${stamp}</exif:DateTimeOriginal><photoshop:DateCreated>${stamp}</photoshop:DateCreated>` +
+    `</rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>`;
+  return new TextEncoder().encode(xml);
+}
+
 export function exifClock(ms: number): { date: string; sub: string; iso: string } {
   const date = new Date(ms);
   const p = (value: number) => String(value).padStart(2, "0");

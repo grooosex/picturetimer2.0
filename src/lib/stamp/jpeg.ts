@@ -1,5 +1,5 @@
-import { concat, exifClock, hasDate, sameBytes, startsWith, wrongDate } from "./binary.ts";
-import { buildTiff, readOrientation, readTiffTime } from "./tiff.ts";
+import { concat, exifClock, hasDate, sameBytes, startsWith, wrongDate, xmpPacket, zoneOffset } from "./binary.ts";
+import { buildTiff, readOrientation, readTiffOffset, readTiffTime } from "./tiff.ts";
 
 type Segment = { marker: number; payload: Uint8Array };
 
@@ -53,23 +53,24 @@ export function stampJpeg(bytes: Uint8Array, ms: number): Uint8Array {
   const split = splitJpeg(bytes);
   if (!split) throw new Error("文件已损坏");
   const clock = exifClock(ms);
+  const offset = zoneOffset(ms);
   let orientation: number | undefined;
   for (const segment of split.segments) {
     if (!isExif(segment)) continue;
     orientation = readOrientation(segment.payload.subarray(6));
     break;
   }
-  const tiff = buildTiff(clock.date, clock.sub, orientation);
+  const tiff = buildTiff(clock.date, clock.sub, orientation, offset);
   const header = new Uint8Array(EXIF_HEADER.length);
   for (let index = 0; index < EXIF_HEADER.length; index += 1) header[index] = EXIF_HEADER.charCodeAt(index);
   const exif: Segment = { marker: 0xe1, payload: concat([header, tiff]) };
+  const xmpHeader = new Uint8Array(XMP_HEADER.length);
+  for (let index = 0; index < XMP_HEADER.length; index += 1) xmpHeader[index] = XMP_HEADER.charCodeAt(index);
+  const xmp: Segment = { marker: 0xe1, payload: concat([xmpHeader, xmpPacket(clock.iso, offset)]) };
   const kept: Segment[] = [];
   for (const segment of split.segments) {
     if (isExif(segment)) continue;
-    if (segment.marker === 0xe1 && startsWith(segment.payload, XMP_HEADER)) {
-      if (!hasDate(segment.payload)) kept.push(segment);
-      continue;
-    }
+    if (segment.marker === 0xe1 && startsWith(segment.payload, XMP_HEADER)) continue;
     if (segment.marker === 0xfe) {
       if (!hasDate(segment.payload)) kept.push(segment);
       continue;
@@ -77,7 +78,7 @@ export function stampJpeg(bytes: Uint8Array, ms: number): Uint8Array {
     kept.push(segment);
   }
   const app0 = kept.findIndex((segment) => segment.marker === 0xe0);
-  kept.splice(app0 >= 0 ? app0 + 1 : 0, 0, exif);
+  kept.splice(app0 >= 0 ? app0 + 1 : 0, 0, exif, xmp);
   const out = concat([Uint8Array.of(0xff, 0xd8), ...kept.map(encodeSegment), split.tail]);
   const check = jpegImageTail(out);
   if (!check || !sameBytes(check, split.tail)) throw new Error("画面校验失败");
@@ -104,9 +105,11 @@ export function jpegTimeProblem(bytes: Uint8Array, ms: number): string | null {
   for (const segment of split.segments) {
     const xmp = segment.marker === 0xe1 && startsWith(segment.payload, XMP_HEADER);
     if (!xmp && segment.marker !== 0xfe) continue;
-    if (hasDate(segment.payload)) return "还有旧时间没去掉";
     const stale = wrongDate(segment.payload, clock.iso, clock.date);
     if (stale) return `还有旧时间 ${stale}`;
   }
+  const exif = split.segments.find(isExif);
+  const zone = exif ? readTiffOffset(exif.payload.subarray(6)) : null;
+  if (zone !== zoneOffset(ms)) return "没有时区，相册会改时间";
   return null;
 }

@@ -1,9 +1,10 @@
-import { concat, exifClock, hasDate, sameBytes, viewOf } from "./binary.ts";
-import { buildTiff, readTiffTime } from "./tiff.ts";
+import { concat, exifClock, sameBytes, viewOf, wrongDate, xmpPacket, zoneOffset } from "./binary.ts";
+import { buildTiff, readTiffOffset, readTiffTime } from "./tiff.ts";
 
 type Chunk = { type: string; data: Uint8Array };
 
 const EXIF_FLAG = 0x08;
+const XMP_FLAG = 0x04;
 const ALPHA_FLAG = 0x10;
 const ANIM_FLAG = 0x02;
 
@@ -93,7 +94,9 @@ export function stampWebp(bytes: Uint8Array, ms: number): Uint8Array {
   const chunks = readChunks(bytes)!;
   const before = webpImage(bytes)!;
   const clock = exifClock(ms);
-  const exif: Chunk = { type: "EXIF", data: buildTiff(clock.date, clock.sub) };
+  const offset = zoneOffset(ms);
+  const exif: Chunk = { type: "EXIF", data: buildTiff(clock.date, clock.sub, undefined, offset) };
+  const xmp: Chunk = { type: "XMP ", data: xmpPacket(clock.iso, offset) };
   const image = chunks.find((chunk) => chunk.type === "VP8 " || chunk.type === "VP8L")!;
   const size = image.type === "VP8 " ? vp8Size(image.data) : vp8lSize(image.data);
   const alpha = chunks.some((chunk) => chunk.type === "ALPH");
@@ -103,7 +106,7 @@ export function stampWebp(bytes: Uint8Array, ms: number): Uint8Array {
     if (chunk.type === "EXIF" || chunk.type === "XMP ") continue;
     if (chunk.type === "VP8X") {
       const data = new Uint8Array(chunk.data);
-      data[0] |= EXIF_FLAG;
+      data[0] |= EXIF_FLAG | XMP_FLAG;
       next.push({ type: "VP8X", data });
       hasVp8x = true;
       continue;
@@ -112,11 +115,9 @@ export function stampWebp(bytes: Uint8Array, ms: number): Uint8Array {
   }
   if (!hasVp8x) {
     if (!size) throw new Error("文件已损坏");
-    next.unshift({ type: "VP8X", data: makeVp8x(size.w, size.h, EXIF_FLAG | (alpha ? ALPHA_FLAG : 0)) });
+    next.unshift({ type: "VP8X", data: makeVp8x(size.w, size.h, EXIF_FLAG | XMP_FLAG | (alpha ? ALPHA_FLAG : 0)) });
   }
-  next.push(exif);
-  const xmp = chunks.find((chunk) => chunk.type === "XMP ");
-  if (xmp && !hasDate(xmp.data)) next.push(xmp);
+  next.push(exif, xmp);
   const out = encode(next);
   const after = webpImage(out);
   if (!after || !sameBytes(before, after)) throw new Error("画面校验失败");
@@ -136,7 +137,12 @@ export function webpTimeProblem(bytes: Uint8Array, ms: number): string | null {
   const found = readWebpTime(bytes);
   if (found !== ms) return found == null ? "读不出拍摄时间" : `时间不对，写成了 ${exifClock(found).iso.replace("T", " ")}`;
   const chunks = readChunks(bytes);
+  const exif = chunks?.find((chunk) => chunk.type === "EXIF");
+  const tiff = exif && exif.data[0] === 0x45 && exif.data[1] === 0x78 ? exif.data.subarray(6) : exif?.data;
+  if (!tiff || readTiffOffset(tiff) !== zoneOffset(ms)) return "没有时区，相册会改时间";
   const xmp = chunks?.find((chunk) => chunk.type === "XMP ");
-  if (!xmp) return null;
-  return hasDate(xmp.data) ? "还有旧时间没去掉" : null;
+  if (!xmp) return "没有时区，相册会改时间";
+  const clock = exifClock(ms);
+  const stale = wrongDate(xmp.data, clock.iso, clock.date);
+  return stale ? `还有旧时间 ${stale}` : null;
 }

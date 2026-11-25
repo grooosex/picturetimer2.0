@@ -1,5 +1,5 @@
-import { concat, crc32, exifClock, hasDate, sameBytes, viewOf, wrongDate } from "./binary.ts";
-import { buildTiff, readTiffTime } from "./tiff.ts";
+import { concat, crc32, exifClock, hasDate, sameBytes, utcIso, viewOf, wrongDate, xmpPacket, zoneOffset } from "./binary.ts";
+import { buildTiff, readTiffOffset, readTiffTime } from "./tiff.ts";
 
 type Chunk = { type: string; data: Uint8Array; raw: Uint8Array };
 
@@ -43,13 +43,31 @@ function tIme(ms: number): Uint8Array {
   const date = new Date(ms);
   const data = new Uint8Array(7);
   const view = new DataView(data.buffer);
-  view.setUint16(0, date.getFullYear());
-  data[2] = date.getMonth() + 1;
-  data[3] = date.getDate();
-  data[4] = date.getHours();
-  data[5] = date.getMinutes();
-  data[6] = date.getSeconds();
+  view.setUint16(0, date.getUTCFullYear());
+  data[2] = date.getUTCMonth() + 1;
+  data[3] = date.getUTCDate();
+  data[4] = date.getUTCHours();
+  data[5] = date.getUTCMinutes();
+  data[6] = date.getUTCSeconds();
   return data;
+}
+
+function xmpText(packet: Uint8Array): Uint8Array {
+  const keyword = new TextEncoder().encode("XML:com.adobe.xmp");
+  const head = new Uint8Array(keyword.length + 5);
+  head.set(keyword, 0);
+  const data = new Uint8Array(head.length + packet.length);
+  data.set(head, 0);
+  data.set(packet, head.length);
+  return data;
+}
+
+function isXmp(data: Uint8Array): boolean {
+  const end = data.indexOf(0);
+  let text = "";
+  const count = end < 0 ? Math.min(data.length, 32) : end;
+  for (let index = 0; index < count; index += 1) text += String.fromCharCode(data[index]);
+  return text === "XML:com.adobe.xmp";
 }
 
 function compressedText(type: string, data: Uint8Array): boolean {
@@ -64,14 +82,19 @@ export function stampPng(bytes: Uint8Array, ms: number): Uint8Array {
   const before = pngIdat(bytes);
   if (!chunks || !before || !chunks.some((chunk) => chunk.type === "IHDR")) throw new Error("文件已损坏");
   const clock = exifClock(ms);
-  const tiff = buildTiff(clock.date, clock.sub);
+  const offset = zoneOffset(ms);
+  const tiff = buildTiff(clock.date, clock.sub, undefined, offset);
   const parts: Uint8Array[] = [bytes.subarray(0, 8)];
   let inserted = false;
-  const timeChunks = [encodeChunk("tIME", tIme(ms)), encodeChunk("eXIf", tiff)];
+  const timeChunks = [
+    encodeChunk("tIME", tIme(ms)),
+    encodeChunk("eXIf", tiff),
+    encodeChunk("iTXt", xmpText(xmpPacket(clock.iso, offset))),
+  ];
   for (const chunk of chunks) {
     if (chunk.type === "tIME" || chunk.type === "eXIf") continue;
     if (chunk.type === "iTXt" || chunk.type === "tEXt" || chunk.type === "zTXt") {
-      if (compressedText(chunk.type, chunk.data) || hasDate(chunk.data)) continue;
+      if (compressedText(chunk.type, chunk.data) || hasDate(chunk.data) || isXmp(chunk.data)) continue;
       parts.push(chunk.raw);
       continue;
     }
@@ -130,10 +153,14 @@ export function pngTimeProblem(bytes: Uint8Array, ms: number): string | null {
     if (chunk.type === "tIME" && chunk.data.length >= 7) {
       const view = viewOf(chunk.data);
       const wall = `${view.getUint16(0)}-${String(chunk.data[2]).padStart(2, "0")}-${String(chunk.data[3]).padStart(2, "0")}T${String(chunk.data[4]).padStart(2, "0")}:${String(chunk.data[5]).padStart(2, "0")}:${String(chunk.data[6]).padStart(2, "0")}`;
-      if (wall !== clock.iso) return `时间不对，写成了 ${wall.replace("T", " ")}`;
+      if (wall !== utcIso(ms)) return `时间不对，写成了 ${wall.replace("T", " ")}`;
+    }
+    if (chunk.type === "eXIf") {
+      const tiff = chunk.data[0] === 0x45 && chunk.data[1] === 0x78 ? chunk.data.subarray(6) : chunk.data;
+      if (readTiffOffset(tiff) !== zoneOffset(ms)) return "没有时区，相册会改时间";
     }
     if (chunk.type !== "tEXt" && chunk.type !== "iTXt" && chunk.type !== "zTXt") continue;
-    if (compressedText(chunk.type, chunk.data) || hasDate(chunk.data)) return "还有旧时间没去掉";
+    if (compressedText(chunk.type, chunk.data)) return "还有旧时间没去掉";
     const stale = wrongDate(chunk.data, clock.iso, clock.date);
     if (stale) return `还有旧时间 ${stale}`;
   }

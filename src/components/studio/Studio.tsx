@@ -3,7 +3,7 @@ import { ChevronDown, ChevronUp, Folder, FolderOpen, Images, RotateCcw, ScanText
 import { toast, Toaster } from "sonner";
 import { loadDir, rememberDir } from "@/lib/folder";
 import { inspect, readOriginalTime, stamp, timeProblem } from "@/lib/stamp/index";
-import { batchStamp, formatClock, type Plan } from "@/lib/timeplan";
+import { batchStamp, computePlan, formatClock, type Plan } from "@/lib/timeplan";
 import { readStealth, readTextMeta } from "@/lib/nai/read";
 import { ExportSheet } from "./ExportSheet";
 import { Grid } from "./Grid";
@@ -205,10 +205,24 @@ export function Studio() {
         saving.current = false;
         return;
       }
+      let active = plan;
+      if (plan.usesNow) {
+        const now = Date.now();
+        const fresh = computePlan({
+          n: snapshot.length,
+          now,
+          owned: plan.autoInterval ? [] : ["interval"],
+          startMs: null,
+          endMs: null,
+          intervalMs: plan.autoInterval ? null : plan.intervalMs,
+        });
+        if (fresh.error) throw new Error(fresh.error);
+        active = fresh;
+      }
       roundRef.current = {
         prefix: batchStamp(Date.now()),
         photos: snapshot,
-        times: plan.times,
+        times: active.times,
         dir,
         next: total - 1,
         verified: 0,
@@ -241,7 +255,7 @@ export function Studio() {
       }
       const index = round.next;
       const photo = round.photos[index];
-      const number = index + 1;
+      const number = total - index;
       const filename = `ord_${round.prefix}_${pad(number)}.${photo.ext}`;
       try {
         if (round.lastName) await previousStillThere(round.dir, round.lastName, number);
@@ -275,7 +289,7 @@ export function Studio() {
       round.next = problem.index;
       if (problem.index + 1 < total) {
         const prev = round.photos[problem.index + 1];
-        round.lastName = `ord_${round.prefix}_${pad(problem.index + 2)}.${prev.ext}`;
+        round.lastName = `ord_${round.prefix}_${pad(total - problem.index - 1)}.${prev.ext}`;
         round.lastTime = round.times[problem.index + 1];
       } else {
         round.lastName = null;
@@ -283,7 +297,7 @@ export function Studio() {
       }
       setProgress(null);
       setSheet(false);
-      setPause({ number: problem.index + 1, name: round.photos[problem.index].name, reason: problem.reason });
+      setPause({ number: total - problem.index, name: round.photos[problem.index].name, reason: problem.reason });
       return;
     }
     setProgress(null);
@@ -651,7 +665,7 @@ async function chooseDir(): Promise<FileSystemDirectoryHandle> {
 
 async function previousStillThere(dir: FileSystemDirectoryHandle, lastName: string, currentNumber: number) {
   const lastNumber = serial(lastName);
-  if (lastNumber == null || lastNumber !== currentNumber + 1) {
+  if (lastNumber == null || lastNumber !== currentNumber - 1) {
     throw new Error(`序号不连着，上一张是 ${lastNumber == null ? "未知" : pad(lastNumber)}`);
   }
   try {
@@ -704,7 +718,7 @@ async function auditTimes(round: Round): Promise<{ index: number; reason: string
   let newer: number | null = null;
   for (let index = 0; index < round.photos.length; index += 1) {
     const photo = round.photos[index];
-    const filename = `ord_${round.prefix}_${pad(index + 1)}.${photo.ext}`;
+    const filename = `ord_${round.prefix}_${pad(round.photos.length - index)}.${photo.ext}`;
     try {
       const handle = await round.dir.getFileHandle(filename);
       const file = await handle.getFile();
@@ -716,7 +730,7 @@ async function auditTimes(round: Round): Promise<{ index: number; reason: string
         const gap = newer - written;
         const expected = round.times[index - 1] - round.times[index];
         if (gap !== expected) {
-          return { index, reason: `和第 ${pad(index)} 张差了 ${seconds(gap)} 秒，应该差 ${seconds(expected)} 秒` };
+          return { index, reason: `和第 ${pad(round.photos.length - index + 1)} 张差了 ${seconds(gap)} 秒，应该差 ${seconds(expected)} 秒` };
         }
       }
       newer = written;

@@ -5,6 +5,9 @@ const TAG_DATETIME = 0x0132;
 const TAG_EXIF_IFD = 0x8769;
 const TAG_ORIGINAL = 0x9003;
 const TAG_DIGITIZED = 0x9004;
+const TAG_OFFSET = 0x9010;
+const TAG_OFFSET_ORIGINAL = 0x9011;
+const TAG_OFFSET_DIGITIZED = 0x9012;
 const TAG_SUB = 0x9290;
 const TAG_SUB_ORIGINAL = 0x9291;
 const TAG_SUB_DIGITIZED = 0x9292;
@@ -17,18 +20,20 @@ function asciiBytes(text: string, size: number): Uint8Array {
   return out;
 }
 
-export function buildTiff(date: string, sub: string, orientation?: number): Uint8Array {
+export function buildTiff(date: string, sub: string, orientation?: number, offset = "+00:00"): Uint8Array {
   const includeOrientation = orientation != null && orientation >= 1 && orientation <= 8;
   const ifd0Tags = includeOrientation ? 3 : 2;
   const ifd0Size = 2 + ifd0Tags * 12 + 4;
   const dateBytes = asciiBytes(date, 20);
   const subBytes = asciiBytes(sub, 4);
-  const exifCount = 5;
+  const offsetBytes = asciiBytes(offset, 8);
+  const exifCount = 8;
   const exifSize = 2 + exifCount * 12 + 4;
   const dateAt = 8 + ifd0Size;
   const originalAt = dateAt + 20;
   const digitizedAt = originalAt + 20;
-  const exifAt = digitizedAt + 20;
+  const offsetAt = digitizedAt + 20;
+  const exifAt = offsetAt + 8;
   const total = exifAt + exifSize;
   const out = new Uint8Array(total);
   const view = new DataView(out.buffer);
@@ -61,12 +66,16 @@ export function buildTiff(date: string, sub: string, orientation?: number): Uint
   out.set(dateBytes, dateAt);
   out.set(dateBytes, originalAt);
   out.set(dateBytes, digitizedAt);
+  out.set(offsetBytes, offsetAt);
 
   cursor = exifAt;
   view.setUint16(cursor, exifCount, true);
   cursor += 2;
   writeEntry(TAG_ORIGINAL, 2, 20, originalAt);
   writeEntry(TAG_DIGITIZED, 2, 20, digitizedAt);
+  writeEntry(TAG_OFFSET, 2, 7, offsetAt);
+  writeEntry(TAG_OFFSET_ORIGINAL, 2, 7, offsetAt);
+  writeEntry(TAG_OFFSET_DIGITIZED, 2, 7, offsetAt);
   writeEntry(TAG_SUB, 2, 4, 0, subBytes);
   writeEntry(TAG_SUB_ORIGINAL, 2, 4, 0, subBytes);
   writeEntry(TAG_SUB_DIGITIZED, 2, 4, 0, subBytes);
@@ -147,6 +156,21 @@ export function readTiffTime(bytes: Uint8Array): { ms: number; orientation?: num
   const ms = parseExifLocal(date, sub);
   if (ms == null) return orientation ? { ms: NaN, orientation } : null;
   return { ms, orientation };
+}
+
+export function readTiffOffset(bytes: Uint8Array): string | null {
+  if (bytes.length < 8) return null;
+  const little = bytes[0] === 0x49 && bytes[1] === 0x49;
+  const big = bytes[0] === 0x4d && bytes[1] === 0x4d;
+  if (!little && !big) return null;
+  const view = viewOf(bytes);
+  const ifd0 = readIfd(bytes, view.getUint32(4, little), little);
+  const exifAt = ifd0.find((entry) => entry.tag === TAG_EXIF_IFD)?.raw ?? 0;
+  if (!exifAt) return null;
+  const offset = readIfd(bytes, exifAt, little).find((entry) => entry.tag === TAG_OFFSET_ORIGINAL);
+  if (!offset) return null;
+  const text = entryText(bytes, offset, little);
+  return /^[+-]\d{2}:\d{2}$/.test(text) ? text : null;
 }
 
 export function readOrientation(bytes: Uint8Array): number | undefined {
